@@ -97,5 +97,3 @@ For contributions, patches, development discussions and ideas please create an i
 Commit your changes, push them into your fork and send a merge request. [The fork documentation page](https://docs.gitlab.com/ee/user/project/repository/forking_workflow.html) gives an overview how to do this in gitlab.
 
 You can find more more details about code organization [here](https://pyspread.gitlab.io/pyspread/)
-# lam-spread
-# lam-spread

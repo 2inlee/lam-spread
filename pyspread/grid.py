@@ -676,6 +676,29 @@ class Grid(QTableView):
 
         self.main_window.statusBar().showMessage(msg)
 
+    # mousePressEvent and keyPressEvent for Tracking User Actions
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+
+        index = self.indexAt(event.pos())
+        if index.isValid():
+            row = index.row()
+            col = index.column()
+            value = self.model.data(index)
+            print(f"[Click] Cell ({row}, {col}) Value: {value}")
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)
+
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            index = self.currentIndex()
+            if index.isValid():
+                row = index.row()
+                col = index.column()
+                value = self.model.data(index)
+                print(f"[Enter] Cell ({row}, {col}) Value: {value}")
+
+    
     def on_row_resized(self, row: int, old_height: float, new_height: float):
         """Row resized event handler
 
