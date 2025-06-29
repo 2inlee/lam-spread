@@ -39,6 +39,7 @@ from contextlib import contextmanager
 from datetime import datetime, date, time
 from io import BytesIO
 from typing import Any, Iterable, List, Tuple, Union
+from PyQt6.QtCore import Qt
 
 import numpy
 
@@ -199,6 +200,10 @@ class Grid(QTableView):
         # Store initial viewport
         self.table_scrolls = {0: (self.verticalScrollBar().value(),
                                   self.horizontalScrollBar().value())}
+        
+        # Connect to the commitData signal of the item delegate
+        """made by inlee"""
+        self.itemDelegate().commitData.connect(self.on_commit_data)
 
     @contextmanager
     def undo_resizing_row(self):
@@ -677,6 +682,24 @@ class Grid(QTableView):
         self.main_window.statusBar().showMessage(msg)
 
     # mousePressEvent and keyPressEvent for Tracking User Actions
+    """
+    Made by inlee
+    """
+
+    def get_surrounding_cells(self, row: int, col: int, radius: int = 1):
+        """
+        주어진 셀의 주변 값을 dict로 반환
+        범위는 radius 만큼 (예: 1이면 총 3x3, 2이면 5x5)
+        """
+        values = {}
+        for r in range(row - radius, row + radius + 1):
+            for c in range(col - radius, col + radius + 1):
+                index = self.model.index(r, c)
+                if index.isValid():
+                    value = self.model.data(index)
+                    values[(r, c)] = value
+        return values
+
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
 
@@ -687,16 +710,30 @@ class Grid(QTableView):
             value = self.model.data(index)
             print(f"[Click] Cell ({row}, {col}) Value: {value}")
 
+            surrounding = self.get_surrounding_cells(row, col, radius=1)
+            print(f"[Context] Surrounding cells: {surrounding}")
+
     def keyPressEvent(self, event):
         super().keyPressEvent(event)
 
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             index = self.currentIndex()
             if index.isValid():
                 row = index.row()
                 col = index.column()
                 value = self.model.data(index)
                 print(f"[Enter] Cell ({row}, {col}) Value: {value}")
+
+    def on_commit_data(self, editor):
+        index = self.currentIndex()
+        if index.isValid():
+            row = index.row()
+            col = index.column()
+            value = self.model.data(index)
+            print(f"[Commit] Cell ({row}, {col}) Value: {value}")
+
+            surrounding = self.get_surrounding_cells(row, col, radius=1)
+            print(f"[Context] Surrounding cells: {surrounding}")
 
     
     def on_row_resized(self, row: int, old_height: float, new_height: float):
