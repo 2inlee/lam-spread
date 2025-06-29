@@ -114,6 +114,8 @@ except ImportError:
     from themes import ColorRole
     from widgets import CellButton
 
+import json
+
 FONTSTYLES = (QFont.Style.StyleNormal,
               QFont.Style.StyleItalic,
               QFont.Style.StyleOblique)
@@ -700,6 +702,26 @@ class Grid(QTableView):
                     values[(r, c)] = value
         return values
 
+
+    def format_cell_context_json(self, row: int, col: int, radius: int = 1):
+        current_index = self.model.index(row, col)
+        current_value = self.model.data(current_index) if current_index.isValid() else ""
+
+        context = self.get_surrounding_cells(row, col, radius)
+
+        data = {
+            "current_cell": {
+                "row": row,
+                "col": col,
+                "value": current_value
+            },
+            "surrounding_cells": {
+                f"({r},{c})": v for (r, c), v in context.items()
+            }
+        }
+
+        return json.dumps(data, ensure_ascii=False, indent=2)  # For console debug
+
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
 
@@ -707,11 +729,9 @@ class Grid(QTableView):
         if index.isValid():
             row = index.row()
             col = index.column()
-            value = self.model.data(index)
-            print(f"[Click] Cell ({row}, {col}) Value: {value}")
 
-            surrounding = self.get_surrounding_cells(row, col, radius=1)
-            print(f"[Context] Surrounding cells: {surrounding}")
+            json_payload = self.format_cell_context_json(row, col, radius=1)
+            print("[LLM INPUT - Click]\n", json_payload)
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)
@@ -729,11 +749,9 @@ class Grid(QTableView):
         if index.isValid():
             row = index.row()
             col = index.column()
-            value = self.model.data(index)
-            print(f"[Commit] Cell ({row}, {col}) Value: {value}")
 
-            surrounding = self.get_surrounding_cells(row, col, radius=1)
-            print(f"[Context] Surrounding cells: {surrounding}")
+            json_payload = self.format_cell_context_json(row, col, radius=1)
+            print("[LLM INPUT - Commit]\n", json_payload)
 
     
     def on_row_resized(self, row: int, old_height: float, new_height: float):
