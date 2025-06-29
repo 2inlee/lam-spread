@@ -34,6 +34,10 @@ Pyspread's main grid
 
 """
 
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from agent import SpreadsheetAgent
 from ast import literal_eval
 from contextlib import contextmanager
 from datetime import datetime, date, time
@@ -206,6 +210,7 @@ class Grid(QTableView):
         # Connect to the commitData signal of the item delegate
         """made by inlee"""
         self.itemDelegate().commitData.connect(self.on_commit_data)
+        self.agent = SpreadsheetAgent()
 
     @contextmanager
     def undo_resizing_row(self):
@@ -721,7 +726,7 @@ class Grid(QTableView):
         }
 
         return json.dumps(data, ensure_ascii=False, indent=2)  # For console debug
-
+    
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
 
@@ -729,9 +734,13 @@ class Grid(QTableView):
         if index.isValid():
             row = index.row()
             col = index.column()
-
             json_payload = self.format_cell_context_json(row, col, radius=1)
-            print("[LLM INPUT - Click]\n", json_payload)
+
+            print("[LLM INPUT - Click Context JSON]", json_payload)
+
+            result = self.agent.analyze_context(json_payload)
+
+            print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)
@@ -749,9 +758,13 @@ class Grid(QTableView):
         if index.isValid():
             row = index.row()
             col = index.column()
-
             json_payload = self.format_cell_context_json(row, col, radius=1)
-            print("[LLM INPUT - Commit]\n", json_payload)
+
+            print("[LLM INPUT - Commit Context JSON]", json_payload)
+
+            result = self.agent.analyze_context(json_payload)
+
+            print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
 
     
     def on_row_resized(self, row: int, old_height: float, new_height: float):
