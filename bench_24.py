@@ -2,23 +2,36 @@ import openai
 import os
 import json
 import re
-import sys
 from tqdm import tqdm
-import time
+import backoff
+from openai.error import RateLimitError
+from datetime import datetime
+import argparse
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# ✅ AoT 방식 프롬프트
-def aot_structured_prompt(observation: str):
-    return f"""
-You are an expert reasoning agent that solves problems using **Algorithm of Thoughts (AoT)**.
+# ✅ 백오프 적용 GPT 호출
+@backoff.on_exception(backoff.expo, RateLimitError, max_tries=6, max_time=60)
+def completions_with_backoff(**kwargs):
+    return openai.ChatCompletion.create(**kwargs)
 
-Your method:
-- Begin with identifying the domain.
-- Decompose the task into **explicit subtasks** using a structured search process.
-- Mark each reasoning step using numbers and headings (e.g. "Subtask 1", "Atomic Subtask 1").
-- Provide intermediate analyses for each subtask.
-- At the end, **combine subtask results** into a final solution.
+# ✅ 프롬프트 템플릿들
+def Baseline1_zeroshot(observation: str, numbers: list):
+    return f"""Given the numbers {numbers}, use +, -, *, / and parentheses to make 24.
+Use each number exactly once. Return answer in JSON:
+
+{{"numbers": {numbers}, "solution": "(1+1+1)*8"}}"""
+
+def Baseline2_cot(observation: str, numbers: list):
+    return f"""Solve step-by-step using arithmetic reasoning:
+
+{observation}
+
+Think step by step. Final answer in JSON format:
+{{"numbers": {numbers}, "solution": "(1+1+1)*8"}}"""
+
+def aot_structured_prompt(observation: str, numbers: list):
+    return f"""You are an expert reasoning agent using Algorithm of Thoughts (AoT).
 
 --- Observation ---
 {observation}
@@ -38,80 +51,32 @@ Respond in this exact format:
 ## Step-by-Step Search Process:
 ...
 
-## Final Answer:
-...
-"""
+## Final Answer (JSON format):
+{{"numbers": {numbers}, "solution": "(1+1+1)*8"}}"""
 
-# ✅ Baseline 1: Zero-shot 방식
-def Baseline1_zeroshot(observation: str):
-    return observation
-
-# ✅ Baseline 2: Chain-of-Thought 방식
-def Baseline2_cot(observation: str):
-    return f"""
-Solve the following problem step by step using arithmetic reasoning:
-
-{observation}
-
-Let's think step by step.
-"""
-
-# ✅ 공통 LLM 실행 함수
+# ✅ LLM 호출 함수
 def run_prompt(prompt: str, mode: str = "aot"):
     system_prompt = {
-        "aot": "You solve problems using structured decomposition and search as in Algorithm of Thoughts.",
+        "aot": "You solve problems using structured decomposition (AoT).",
         "cot": "You solve problems using step-by-step reasoning.",
         "zero_shot": "You solve math puzzles directly."
     }[mode]
 
-    # time.sleep(1.2)  # ✅ 요청 전 딜레이 (초당 1~2회 허용 기준)
-
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
+        response = completions_with_backoff(
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3
         )
-        return response['choices'][0]['message']['content']
+        content = response['choices'][0]['message']['content']
+        usage = response['usage']
+        return content, usage
     except Exception as e:
         print(f"❌ API Error: {e}")
-        return None
-
-# ✅ 후처리: 수식 추출용 LLM 호출
-def extract_expression_from_llm_response(llm_response: str) -> str:
-    prompt = f"""
-You are a math expression cleaner.
-
-Given the following LLM output, extract only the **final numeric expression** used to compute 24.
-- Remove any explanations or commentary.
-- Return a clean, parsable Python expression (e.g., (1+1+1)*8).
-- Replace '×', 'x', etc. with '*'
-- Do NOT include '= 24' or any trailing numbers.
-
---- LLM Output ---
-{llm_response}
-------------------
-
-Cleaned Expression:
-"""
-    # time.sleep(1.2)  # ✅ 요청 전 딜레이 (초당 1~2회 허용 기준)
-
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You extract clean mathematical expressions from noisy outputs."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0
-        )
-        return response['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        print(f"❌ Post-processing LLM error: {e}")
-        return None
+        return None, None
 
 # ✅ 평가 함수
 def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot"):
@@ -120,62 +85,89 @@ def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot
 
     correct = 0
     total = 0
+    log_path = f"logs/game24_logs_{mode}.jsonl"
+    os.makedirs("logs", exist_ok=True)
 
     print(f"\n🧠 Evaluating Game of 24 | Mode: {mode} | Samples: {max_samples}\n")
 
-    for sample in tqdm(data[:max_samples]):
-        row = sample["row"]
-        numbers = row["numbers"]
-        solutions = row["solutions"]
-        observation = f"Given the numbers {numbers}, use +, -, *, / and parentheses to make the number 24."
+    with open(log_path, 'w') as logfile:
+        for sample in tqdm(data[:max_samples]):
+            row_id = sample["row_idx"]
+            row = sample["row"]
+            numbers = row["numbers"]
+            ground_truth = row["solutions"][0] if row["solutions"] else "N/A"
+            observation = f"Given the numbers {numbers}, use +, -, *, / and parentheses to make the number 24."
 
-        if mode == "aot":
-            prompt = aot_structured_prompt(observation)
-        elif mode == "cot":
-            prompt = Baseline2_cot(observation)
-        elif mode == "zero_shot":
-            prompt = Baseline1_zeroshot(observation)
-        else:
-            raise ValueError("Invalid mode. Use one of: aot, cot, zero_shot")
+            if mode == "aot":
+                prompt = aot_structured_prompt(observation, numbers)
+            elif mode == "cot":
+                prompt = Baseline2_cot(observation, numbers)
+            elif mode == "zero_shot":
+                prompt = Baseline1_zeroshot(observation, numbers)
+            else:
+                raise ValueError("Invalid mode. Use one of: aot, cot, zero_shot")
 
-        llm_response = run_prompt(prompt, mode)
-        if not llm_response:
-            print("⚠️ No LLM response.")
-            continue
-
-        cleaned = extract_expression_from_llm_response(llm_response)
-        if not cleaned:
-            print("⚠️ Failed to extract expression.")
-            continue
-
-        # 안전 처리
-        expr = cleaned.replace("×", "*").replace("x", "*")
-        expr = re.sub(r"[^\d\+\-\*\/\(\)\.]", "", expr)
-
-        try:
-            result = eval(expr)
-            is_correct = abs(result - 24) < 1e-4
-        except Exception as e:
-            print(f"❌ Eval error: {e}")
+            llm_response, usage = run_prompt(prompt, mode)
+            error_type = None
+            parsed_expr = None
+            eval_result = None
             is_correct = False
 
-        print(f"\n🧩 Input:      {numbers}")
-        print(f"🎯 Ground truth: {solutions[0] if solutions else 'N/A'}")
-        print(f"🤖 LLM raw:    {llm_response[:150]}...")
-        print(f"✅ Parsed:     {expr}")
-        print(f"📌 Result:     {'✅ Correct' if is_correct else '❌ Incorrect'}")
+            if not llm_response:
+                error_type = "llm_no_response"
+            else:
+                try:
+                    match = re.search(r"\{.*\}", llm_response, re.DOTALL)
+                    parsed_json = json.loads(match.group()) if match else None
+                    parsed_expr = parsed_json["solution"] if parsed_json else None
+                except Exception as e:
+                    error_type = "parse_error"
 
-        total += 1
-        if is_correct:
-            correct += 1
+                if parsed_expr:
+                    parsed_expr = parsed_expr.replace("×", "*").replace("x", "*")
+                    parsed_expr = re.sub(r"[^\d\+\-\*\/\(\)\.]", "", parsed_expr)
+                    try:
+                        eval_result = eval(parsed_expr)
+                        is_correct = abs(eval_result - 24) < 1e-4
+                        error_type = None if is_correct else "wrong_result"
+                    except Exception as e:
+                        error_type = "eval_error"
+
+            total += 1
+            if is_correct:
+                correct += 1
+
+            print(f"\n🧩 Input:      {numbers}")
+            print(f"🎯 Ground truth: {ground_truth}")
+            print(f"🤖 LLM raw:    {llm_response[:150] if llm_response else 'N/A'}")
+            print(f"✅ Parsed:     {parsed_expr}")
+            print(f"📌 Result:     {'✅ Correct' if is_correct else '❌ Incorrect'}")
+
+            # ✅ 로그 저장
+            log_entry = {
+                "id": row_id,
+                "input_numbers": numbers,
+                "ground_truth": ground_truth,
+                "prompt_type": mode,
+                "prompt": prompt,
+                "llm_response": llm_response,
+                "parsed_expression": parsed_expr,
+                "eval_result": eval_result,
+                "is_correct": is_correct,
+                "error_type": error_type,
+                "input_tokens": usage["prompt_tokens"] if usage else None,
+                "output_tokens": usage["completion_tokens"] if usage else None,
+                "total_tokens": usage["total_tokens"] if usage else None,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            logfile.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
     accuracy = correct / total if total > 0 else 0.0
     print(f"\n✅ Final Accuracy ({mode}): {correct}/{total} ({accuracy:.2%})")
+    print(f"📁 Logs saved to: {log_path}")
 
-# ✅ 명령행 파라미터 기반 실행
+# ✅ 명령행 실행
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", type=str, default="aot", choices=["aot", "cot", "zero_shot"], help="Prompting strategy to use")
     parser.add_argument("--file", type=str, default="game24.json", help="Path to dataset file")
@@ -185,11 +177,11 @@ if __name__ == "__main__":
     evaluate_game24_from_json(path=args.file, max_samples=args.samples, mode=args.mode)
 
 
-# AoT 방식 평가
+#     # AOT 방식 평가
 # python3 bench_24.py --mode aot --samples 10
 
-# Zero-shot baseline 평가
-# python3 bench_24.py --mode zero_shot --samples 10
-
-# Chain-of-Thought baseline 평가
+# # Chain-of-Thought 방식 평가
 # python3 bench_24.py --mode cot --samples 10
+
+# # Zero-shot 방식 평가
+# python3 bench_24.py --mode zero_shot --samples 10

@@ -727,20 +727,20 @@ class Grid(QTableView):
 
         return json.dumps(data, ensure_ascii=False, indent=2)  # For console debug
     
-    def mousePressEvent(self, event):
-        super().mousePressEvent(event)
+    # def mousePressEvent(self, event):
+    #     super().mousePressEvent(event)
 
-        index = self.indexAt(event.pos())
-        if index.isValid():
-            row = index.row()
-            col = index.column()
-            json_payload = self.format_cell_context_json(row, col, radius=2)
+    #     index = self.indexAt(event.pos())
+    #     if index.isValid():
+    #         row = index.row()
+    #         col = index.column()
+    #         json_payload = self.format_cell_context_json(row, col, radius=2)
 
-            print("[LLM INPUT - Click Context JSON]", json_payload)
+    #         print("[LLM INPUT - Click Context JSON]", json_payload)
 
-            result = self.agent.analyze_context(json_payload)
+    #         result = self.agent.analyze_context(json_payload)
 
-            print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
+    #         print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)
