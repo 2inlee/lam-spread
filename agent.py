@@ -62,19 +62,18 @@ class SpreadsheetAgent:
         프롬프트 생성: 현재 셀 및 주변 셀 문맥을 기반으로 LLM에게 설명
         """
         return f"""
-다음은 사용자가 선택하거나 편집한 셀과 주변 셀의 값들입니다.
-이 정보를 기반으로 사용자의 의도를 추론하고,
-어떤 셀에 어떤 수식 또는 값을 입력해야 할지 다음 형식으로 JSON으로 답해주세요.
+            다음은 사용자가 선택하거나 편집한 셀과 주변 셀의 값들입니다.
+            이 정보를 기반으로 사용자의 의도를 추론하고,
+            어떤 셀에 어떤 수식 또는 값을 입력해야 할지 다음 형식으로 JSON으로 답해주세요.
 
-출력 예시:
-{{
-  "action": "sum_column",
-  "target_cells": [[5, 2]],
-  "value": "=SUM(B2:B4)",
-  "reasoning": "사용자는 B열 숫자들의 합계를 구하려는 의도입니다."
-}}
+            # 출력 예시:
+            {{
+                "action": "sum_column",
+                "target_cells": [[5, 2]],
+                "value": "=SUM(B2:B4)",
+                "reasoning": "사용자는 B열 숫자들의 합계를 구하려는 의도입니다."
+            }}
 
-아래는 입력 데이터입니다:
-
-{json.dumps(context, ensure_ascii=False, indent=2)}
-"""
+            # 아래는 입력 데이터입니다:
+            {json.dumps(context, ensure_ascii=False, indent=2)}
+        """

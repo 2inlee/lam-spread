@@ -693,7 +693,7 @@ class Grid(QTableView):
     Made by inlee
     """
 
-    def get_surrounding_cells(self, row: int, col: int, radius: int = 1):
+    def get_surrounding_cells(self, row: int, col: int, radius: int = 2):
         """
         주어진 셀의 주변 값을 dict로 반환
         범위는 radius 만큼 (예: 1이면 총 3x3, 2이면 5x5)
@@ -708,7 +708,7 @@ class Grid(QTableView):
         return values
 
 
-    def format_cell_context_json(self, row: int, col: int, radius: int = 1):
+    def format_cell_context_json(self, row: int, col: int, radius: int = 2):
         current_index = self.model.index(row, col)
         current_value = self.model.data(current_index) if current_index.isValid() else ""
 
@@ -734,7 +734,7 @@ class Grid(QTableView):
         if index.isValid():
             row = index.row()
             col = index.column()
-            json_payload = self.format_cell_context_json(row, col, radius=1)
+            json_payload = self.format_cell_context_json(row, col, radius=2)
 
             print("[LLM INPUT - Click Context JSON]", json_payload)
 
@@ -758,7 +758,7 @@ class Grid(QTableView):
         if index.isValid():
             row = index.row()
             col = index.column()
-            json_payload = self.format_cell_context_json(row, col, radius=1)
+            json_payload = self.format_cell_context_json(row, col, radius=2)
 
             print("[LLM INPUT - Commit Context JSON]", json_payload)
 
