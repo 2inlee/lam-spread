@@ -1,0 +1,4 @@
+Mode,Total Samples,Correct,Accuracy (%),Avg Input Tokens,Avg Output Tokens,Avg Total Tokens,Tokens per Correct,Accuracy per 1K Tokens
+zero_shot,100,21,21.0,83.0,38.04,121.04,118.05,1.73
+cot,100,94,94.0,96.0,450.45,546.45,540.98,1.72
+aot,100,82,82.0,133.0,845.38,978.38,634.95,0.84

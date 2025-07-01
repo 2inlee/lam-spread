@@ -7,6 +7,7 @@ import backoff
 from openai.error import RateLimitError
 from datetime import datetime
 import argparse
+from datasets import load_dataset
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -78,11 +79,21 @@ def run_prompt(prompt: str, mode: str = "aot"):
         print(f"❌ API Error: {e}")
         return None, None
 
-# ✅ 평가 함수
+# ✅ 기존 JSON 평가
 def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot"):
     with open(path, 'r') as f:
         data = json.load(f)["rows"]
 
+    _evaluate_samples(data, mode, max_samples, from_json=True)
+
+# ✅ HF 데이터셋 평가 함수 추가
+def evaluate_game24_from_hf(max_samples: int = 50, mode: str = "aot"):
+    dataset = load_dataset("nlile/24-game")["train"]
+    data = [{"row_idx": i, "row": row} for i, row in enumerate(dataset.select(range(max_samples)))]
+    _evaluate_samples(data, mode, max_samples, from_json=False)
+
+# ✅ 공통 평가 로직
+def _evaluate_samples(data, mode, max_samples, from_json):
     correct = 0
     total = 0
     log_path = f"logs/game24_logs_{mode}.jsonl"
@@ -93,7 +104,7 @@ def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot
     with open(log_path, 'w') as logfile:
         for sample in tqdm(data[:max_samples]):
             row_id = sample["row_idx"]
-            row = sample["row"]
+            row = sample["row"] if from_json else sample["row"]
             numbers = row["numbers"]
             ground_truth = row["solutions"][0] if row["solutions"] else "N/A"
             observation = f"Given the numbers {numbers}, use +, -, *, / and parentheses to make the number 24."
@@ -120,7 +131,7 @@ def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot
                     match = re.search(r"\{.*\}", llm_response, re.DOTALL)
                     parsed_json = json.loads(match.group()) if match else None
                     parsed_expr = parsed_json["solution"] if parsed_json else None
-                except Exception as e:
+                except Exception:
                     error_type = "parse_error"
 
                 if parsed_expr:
@@ -130,7 +141,7 @@ def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot
                         eval_result = eval(parsed_expr)
                         is_correct = abs(eval_result - 24) < 1e-4
                         error_type = None if is_correct else "wrong_result"
-                    except Exception as e:
+                    except Exception:
                         error_type = "eval_error"
 
             total += 1
@@ -143,7 +154,6 @@ def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot
             print(f"✅ Parsed:     {parsed_expr}")
             print(f"📌 Result:     {'✅ Correct' if is_correct else '❌ Incorrect'}")
 
-            # ✅ 로그 저장
             log_entry = {
                 "id": row_id,
                 "input_numbers": numbers,
@@ -170,12 +180,14 @@ def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", type=str, default="aot", choices=["aot", "cot", "zero_shot"], help="Prompting strategy to use")
-    parser.add_argument("--file", type=str, default="game24.json", help="Path to dataset file")
+    parser.add_argument("--file", type=str, default="game24.json", help="Path to dataset file (use 'hf' to load from Hugging Face)")
     parser.add_argument("--samples", type=int, default=5, help="Number of samples to evaluate")
     args = parser.parse_args()
 
-    evaluate_game24_from_json(path=args.file, max_samples=args.samples, mode=args.mode)
-
+    if args.file == "hf":
+        evaluate_game24_from_hf(max_samples=args.samples, mode=args.mode)
+    else:
+        evaluate_game24_from_json(path=args.file, max_samples=args.samples, mode=args.mode)
 
 #     # AOT 방식 평가
 # python3 bench_24.py --mode aot --samples 10
@@ -185,3 +197,9 @@ if __name__ == "__main__":
 
 # # Zero-shot 방식 평가
 # python3 bench_24.py --mode zero_shot --samples 10
+
+# HF
+# python3 bench_24.py --mode aot --file hf --samples 1362
+
+# Local
+# python3 bench_24.py --mode aot --file game24.json --samples 1362
