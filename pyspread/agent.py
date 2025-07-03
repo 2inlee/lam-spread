@@ -92,6 +92,11 @@ def validate_llm_output(data: Dict[str, Any]) -> Tuple[List[Tuple[int, int, int]
 
     value = data["value"].strip()
     values = [v.strip() for v in value.split(",")] if "," in value else [value] * len(cells)
+    if len(values) < len(cells):
+        values += [''] * (len(cells) - len(values))
+    elif len(values) > len(cells):
+        values = values[:len(cells)]
+
     values = [v if v.startswith("=") or v.startswith("'") else f"'{v}'" for v in values]
 
     if len(values) != len(cells):
