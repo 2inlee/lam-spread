@@ -37,6 +37,8 @@ pyspread
 from collections.abc import Iterable
 import os
 from pathlib import Path
+from pyspread import context
+from pyspread.agent import SpreadsheetAgent
 
 from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QTimer, QRectF
 from PyQt6.QtWidgets import (QWidget, QMainWindow, QApplication,
@@ -93,6 +95,9 @@ except ImportError:
     from model.model import CellAttributes
 
 
+# made by inlee for global
+main_window_instance = None
+
 LICENSE = "GNU GENERAL PUBLIC LICENSE Version 3"
 
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
@@ -110,8 +115,12 @@ class MainWindow(QMainWindow):
         :param default_settings: Ignore stored `QSettings` and use defaults
 
         """
+        context.main_window_instance = self
 
         super().__init__()
+
+        # made by inlee for global
+        set_main_window_instance(self)
 
         self._loading = True  # For initial loading of pyspread
         self.prevent_updates = False  # Prevents setData updates in grid
@@ -122,6 +131,12 @@ class MainWindow(QMainWindow):
         self.refresh_timer = QTimer()
 
         self._init_widgets()
+
+        """
+        made by inlee
+        """
+        self.agent = SpreadsheetAgent()
+        self.grid.set_agent(self.agent)
 
         self.main_window_actions = MainWindowActions(self)
         self.main_window_toolbar_actions = MainWindowActions(self,
@@ -162,6 +177,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(msg)
 
         self.settings.changed_since_save = False
+
 
     def _init_window(self):
         """Initialize main window components"""
@@ -859,3 +875,12 @@ class MainWindow(QMainWindow):
             attributes.merge_area is not None)
         self.main_window_toolbar_actions.merge_cells.setChecked(
             attributes.merge_area is not None)
+
+# made by inlee
+
+def set_main_window_instance(instance):
+    global main_window_instance
+    main_window_instance = instance
+
+def get_main_window_instance():
+    return main_window_instance

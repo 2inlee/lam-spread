@@ -34,10 +34,9 @@ Pyspread's main grid
 
 """
 
-import os
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from agent import SpreadsheetAgent
+# === LLM 연동 관련 ===
+import json
+from pyspread.agent import SpreadsheetAgent, validate_llm_output, apply_cell_changes
 from ast import literal_eval
 from contextlib import contextmanager
 from datetime import datetime, date, time
@@ -118,7 +117,6 @@ except ImportError:
     from themes import ColorRole
     from widgets import CellButton
 
-import json
 
 FONTSTYLES = (QFont.Style.StyleNormal,
               QFont.Style.StyleItalic,
@@ -127,7 +125,7 @@ FONTSTYLES = (QFont.Style.StyleNormal,
 
 class Grid(QTableView):
     """The main grid of pyspread"""
-
+    
     def __init__(self, main_window: QMainWindow, model=None):
         """
         :param main_window: Application main window
@@ -136,11 +134,9 @@ class Grid(QTableView):
         """
 
         super().__init__()
-
         self.main_window = main_window
-
-        shape = main_window.settings.shape
-
+        shape = self.main_window.settings.shape
+        
         if model is None:
             self.model = GridTableModel(main_window, shape)
         else:
@@ -211,6 +207,98 @@ class Grid(QTableView):
         """made by inlee"""
         self.itemDelegate().commitData.connect(self.on_commit_data)
         self.agent = SpreadsheetAgent()
+
+
+    def set_agent(self, agent):
+        self.agent = agent
+
+    def get_surrounding_cells(self, row: int, col: int, radius: int = 2):
+        """
+        주어진 셀의 주변 값을 dict로 반환
+        범위는 radius 만큼 (예: 1이면 총 3x3, 2이면 5x5)
+        """
+        values = {}
+        for r in range(row - radius, row + radius + 1):
+            for c in range(col - radius, col + radius + 1):
+                index = self.model.index(r, c)
+                if index.isValid():
+                    value = self.model.data(index)
+                    values[(r, c)] = value
+        return values
+    def handle_llm_response(self, context_json: str):
+        """LLM 호출 및 응답 처리 -> 셀 값 적용"""
+        if not self.agent:
+            print("[LLM Error] SpreadsheetAgent not set.")
+            return
+
+        result = self.agent.analyze_context(context_json)
+        print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
+
+        try:
+            cells, values = validate_llm_output(result)
+            apply_cell_changes(cells, values)
+        except Exception as e:
+            print(f"[LLM Error] {e}")
+
+
+    def format_cell_context_json(self, row: int, col: int, radius: int = 2):
+        current_index = self.model.index(row, col)
+        current_value = self.model.data(current_index) if current_index.isValid() else ""
+
+        context = self.get_surrounding_cells(row, col, radius)
+
+        data = {
+            "current_cell": {
+                "row": row,
+                "col": col,
+                "value": current_value
+            },
+            "surrounding_cells": {
+                f"({r},{c})": v for (r, c), v in context.items()
+            }
+        }
+
+        return json.dumps(data, ensure_ascii=False, indent=2)  # For console debug
+    
+    # def mousePressEvent(self, event):
+    #     super().mousePressEvent(event)
+
+    #     index = self.indexAt(event.pos())
+    #     if index.isValid():
+    #         row = index.row()
+    #         col = index.column()
+    #         json_payload = self.format_cell_context_json(row, col, radius=2)
+
+    #         print("[LLM INPUT - Click Context JSON]", json_payload)
+
+    #         result = self.agent.analyze_context(json_payload)
+
+    #         print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)
+
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            index = self.currentIndex()
+            if index.isValid():
+                row = index.row()
+                col = index.column()
+                value = self.model.data(index)
+                print(f"[Enter] Cell ({row}, {col}) Value: {value}")
+
+    def on_commit_data(self, editor):
+        """셀 편집 완료 시 자동 LLM 호출"""
+        index = self.currentIndex()
+        if not index.isValid():
+            return
+
+        row, col = index.row(), index.column()
+        context_json = self.format_cell_context_json(row, col, radius=2)
+
+        print("[LLM INPUT - Commit Context JSON]", context_json)
+        self.handle_llm_response(context_json)
+
+
 
     @contextmanager
     def undo_resizing_row(self):
@@ -689,82 +777,6 @@ class Grid(QTableView):
         self.main_window.statusBar().showMessage(msg)
 
     # mousePressEvent and keyPressEvent for Tracking User Actions
-    """
-    Made by inlee
-    """
-
-    def get_surrounding_cells(self, row: int, col: int, radius: int = 2):
-        """
-        주어진 셀의 주변 값을 dict로 반환
-        범위는 radius 만큼 (예: 1이면 총 3x3, 2이면 5x5)
-        """
-        values = {}
-        for r in range(row - radius, row + radius + 1):
-            for c in range(col - radius, col + radius + 1):
-                index = self.model.index(r, c)
-                if index.isValid():
-                    value = self.model.data(index)
-                    values[(r, c)] = value
-        return values
-
-
-    def format_cell_context_json(self, row: int, col: int, radius: int = 2):
-        current_index = self.model.index(row, col)
-        current_value = self.model.data(current_index) if current_index.isValid() else ""
-
-        context = self.get_surrounding_cells(row, col, radius)
-
-        data = {
-            "current_cell": {
-                "row": row,
-                "col": col,
-                "value": current_value
-            },
-            "surrounding_cells": {
-                f"({r},{c})": v for (r, c), v in context.items()
-            }
-        }
-
-        return json.dumps(data, ensure_ascii=False, indent=2)  # For console debug
-    
-    # def mousePressEvent(self, event):
-    #     super().mousePressEvent(event)
-
-    #     index = self.indexAt(event.pos())
-    #     if index.isValid():
-    #         row = index.row()
-    #         col = index.column()
-    #         json_payload = self.format_cell_context_json(row, col, radius=2)
-
-    #         print("[LLM INPUT - Click Context JSON]", json_payload)
-
-    #         result = self.agent.analyze_context(json_payload)
-
-    #         print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
-
-    def keyPressEvent(self, event):
-        super().keyPressEvent(event)
-
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            index = self.currentIndex()
-            if index.isValid():
-                row = index.row()
-                col = index.column()
-                value = self.model.data(index)
-                print(f"[Enter] Cell ({row}, {col}) Value: {value}")
-
-    def on_commit_data(self, editor):
-        index = self.currentIndex()
-        if index.isValid():
-            row = index.row()
-            col = index.column()
-            json_payload = self.format_cell_context_json(row, col, radius=2)
-
-            print("[LLM INPUT - Commit Context JSON]", json_payload)
-
-            result = self.agent.analyze_context(json_payload)
-
-            print("[LLM OUTPUT]", json.dumps(result, ensure_ascii=False, indent=2))
 
     
     def on_row_resized(self, row: int, old_height: float, new_height: float):
