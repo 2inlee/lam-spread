@@ -7,7 +7,7 @@ import backoff
 from openai.error import RateLimitError
 from datetime import datetime
 import argparse
-from datasets import load_dataset
+from datasets import Dataset
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -29,19 +29,17 @@ def run_prompt(prompt: str):
         usage = response['usage']
         return content, usage
     except Exception as e:
-        print(f"❌ API Error: {e}")
+        print(f"\u274c API Error: {e}")
         return None, None
 
-# Stage 1: Context Understanding
-
-def plam_stage1_prompt(observation: str, numbers: list):
+def plam_stage1_prompt(observation: str, entities: list):
     return f"""
 You are a reflective reasoning agent. Your first task is to understand the situation, identify the domain, and extract relevant abstract knowledge before attempting a solution.
 
 Follow these steps:
 
 # [ENVIRONMENT STATE]
-- Entities: {numbers}
+- Entities: {entities}
 - Observation: {observation}
 
 ----
@@ -85,9 +83,7 @@ Format:
 {{"rephrased": "...", "goal": "...", "domain": "...", "principles": "...", "intervention": "Yes"}}  
 """
 
-# Stage 2: Planning and Execution
-
-def plam_stage2_prompt(context: str, numbers: list):
+def plam_stage2_prompt(context: str, entities: list):
     return f"""
 You are now in execution mode.
 
@@ -116,62 +112,61 @@ Use this format:
 
 At the end, return:
 
-{{"entities": {numbers}, "solution": "(...)"}}  
+{{"entities": {entities}, "solution": "Yes" or "No"}}  
 """
 
-def run_two_stage_plam(observation: str, numbers: list):
-    stage1 = plam_stage1_prompt(observation, numbers)
+def run_two_stage_plam(observation: str, entities: list):
+    stage1 = plam_stage1_prompt(observation, entities)
     stage1_output, _ = run_prompt(stage1)
 
     if not stage1_output or "Intervention: No" in stage1_output:
         return stage1_output, None, None
 
     planning_context = stage1_output
-    stage2 = plam_stage2_prompt(planning_context, numbers)
+    stage2 = plam_stage2_prompt(planning_context, entities)
     stage2_output, usage = run_prompt(stage2)
 
     return stage1_output, stage2_output, usage
 
-def evaluate_game24(samples: int):
-    dataset = load_dataset("nlile/24-game")['train']
-    data = [{"row_idx": i, "row": row} for i, row in enumerate(dataset.select(range(samples)))]
+def load_clean_strategyqa_dataset(samples: int):
+    import json
+    json_path = os.path.expanduser("~/.cache/huggingface/hub/datasets--voidful--StrategyQA/snapshots/2279eaf9f2580aef77ed6fa0efd7846c381ab5a0/strategyqa_train.json")
+    with open(json_path, "r") as f:
+        raw_data = json.load(f)
+    clean_data = [{k: v for k, v in ex.items() if k != "evidence"} for ex in raw_data[:samples]]
+    return Dataset.from_list(clean_data)
+
+def evaluate_strategyqa(samples: int):
+    dataset = load_clean_strategyqa_dataset(samples)
     correct = 0
     total = 0
     os.makedirs("logs", exist_ok=True)
-    log_path = f"logs/game24_logs_plam.jsonl"
+    log_path = f"logs/strategyqa_logs_plam.jsonl"
 
     with open(log_path, 'w') as logfile:
-        for sample in tqdm(data):
-            row_id = sample["row_idx"]
-            row = sample["row"]
-            numbers = row["numbers"]
-            ground_truth = row["solutions"][0] if row["solutions"] else "N/A"
-            observation = f"Given the numbers {numbers}, use +, -, *, / and parentheses to make the number 24."
+        for i, row in enumerate(tqdm(dataset)):
+            question = row["question"]
+            answer = "yes" if row["answer"] else "no"
+            observation = f"Question: {question}"
+            entities = [row["term"]]
 
-            stage1, stage2, usage = run_two_stage_plam(observation, numbers)
+            stage1, stage2, usage = run_two_stage_plam(observation, entities)
             prompt_used = stage1 + "\n---\n" + (stage2 or "")
             llm_response = stage2
 
-            error_type = parsed_expr = eval_result = None
+            predicted_answer = None
             is_correct = False
+            error_type = None
 
             if llm_response:
                 try:
                     match = re.search(r"\{.*\}", llm_response, re.DOTALL)
                     parsed_json = json.loads(match.group()) if match else None
-                    parsed_expr = parsed_json["solution"] if parsed_json else None
+                    predicted_answer = parsed_json.get("solution", "").strip().lower()
+                    if predicted_answer in ["yes", "no"]:
+                        is_correct = predicted_answer == answer
                 except:
                     error_type = "parse_error"
-
-                if parsed_expr:
-                    parsed_expr = parsed_expr.replace("×", "*").replace("x", "*")
-                    parsed_expr = re.sub(r"[^\d\+\-\*\/\(\)\.]", "", parsed_expr)
-                    try:
-                        eval_result = eval(parsed_expr)
-                        is_correct = abs(eval_result - 24) < 1e-4
-                        error_type = None if is_correct else "wrong_result"
-                    except:
-                        error_type = "eval_error"
             else:
                 error_type = "llm_no_response"
 
@@ -179,21 +174,20 @@ def evaluate_game24(samples: int):
             if is_correct:
                 correct += 1
 
-            print(f"\n🧩 Input Numbers: {numbers}")
-            print(f"🎯 Ground Truth : {ground_truth}")
+            print(f"\n❓ Question: {question}")
+            print(f"✅ Ground Truth : {answer}")
             print(f"🧠 Stage 1 Output:\n{stage1}")
             print(f"🤖 Stage 2 Response:\n{stage2}\n")
-            print(f"✅ Parsed       : {parsed_expr}")
-            print(f"📌 Result       : {'✅ Correct' if is_correct else '❌ Incorrect'}")
+            print(f"📌 Predicted    : {predicted_answer}")
+            print(f"📍 Result       : {'✅ Correct' if is_correct else '❌ Incorrect'}")
 
             log_entry = {
-                "id": row_id,
-                "input_numbers": numbers,
-                "ground_truth": ground_truth,
+                "id": i,
+                "question": question,
+                "ground_truth": answer,
                 "prompt": prompt_used,
                 "llm_response": llm_response,
-                "parsed_expression": parsed_expr,
-                "eval_result": eval_result,
+                "predicted_answer": predicted_answer,
                 "is_correct": is_correct,
                 "error_type": error_type,
                 "input_tokens": usage["prompt_tokens"] if usage else None,
@@ -211,6 +205,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=5, help="Number of samples to evaluate")
     args = parser.parse_args()
-    evaluate_game24(samples=args.samples)
-
-# python3 bench_24.py --samples 15
+    evaluate_strategyqa(samples=args.samples)
