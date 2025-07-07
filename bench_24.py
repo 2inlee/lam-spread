@@ -11,12 +11,55 @@ from datasets import load_dataset
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# ✅ 백오프 적용 GPT 호출
 @backoff.on_exception(backoff.expo, RateLimitError, max_tries=6, max_time=60)
 def completions_with_backoff(**kwargs):
     return openai.ChatCompletion.create(**kwargs)
 
-# ✅ 프롬프트 템플릿들
+# ✅ P-LAM 6단계 프롬프트
+def plam_prompt(observation: str, numbers: list):
+    return f"""
+# [SYSTEM STATE]
+Current environment state:
+- Numbers: {numbers}
+- Observation: {observation}
+
+----
+
+# [PHASE 1: Situation Rephrasing]
+Rephrase the given environment state in natural language. Describe what this situation represents, so a human can easily understand it.
+
+----
+
+# [PHASE 2: Intervention Decision]
+Determine whether proactive intervention is necessary in this situation.
+- Should the system intervene proactively? [Yes / No]
+- Reason:
+
+----
+
+# [PHASE 3: Intent Inference]
+Based on the current situation, what is the user's likely underlying goal?
+
+----
+
+# [PHASE 4: High-Level Goal Abstraction]
+Rephrase the inferred goal in high-level, abstract terms suitable for planning and reasoning.
+
+----
+
+# [PHASE 5: Action Planning]
+List the actions required to achieve the goal, and decompose them into step-by-step sub-tasks.
+
+----
+
+# [PHASE 6: Sub-task Reasoning & Final Solution]
+Carry out the sub-tasks step by step using logical reasoning to solve the problem.
+
+Return the final result in the following JSON format:
+{{"numbers": {numbers}, "solution": "(8/(3-1))*3"}}
+"""
+
+# ✅ 기존 프롬프트들
 def Baseline1_zeroshot(observation: str, numbers: list):
     return f"""Given the numbers {numbers}, use +, -, *, / and parentheses to make 24.
 Use each number exactly once. Return answer in JSON:
@@ -55,12 +98,13 @@ Respond in this exact format:
 ## Final Answer (JSON format):
 {{"numbers": {numbers}, "solution": "(1+1+1)*8"}}"""
 
-# ✅ LLM 호출 함수
+# ✅ LLM 호출
 def run_prompt(prompt: str, mode: str = "aot"):
     system_prompt = {
         "aot": "You solve problems using structured decomposition (AoT).",
         "cot": "You solve problems using step-by-step reasoning.",
-        "zero_shot": "You solve math puzzles directly."
+        "zero_shot": "You solve math puzzles directly.",
+        "plam": "You are a proactive reasoning agent. Analyze environment, determine whether to act, infer goal, plan actions, and solve."
     }[mode]
 
     try:
@@ -79,20 +123,19 @@ def run_prompt(prompt: str, mode: str = "aot"):
         print(f"❌ API Error: {e}")
         return None, None
 
-# ✅ 기존 JSON 평가
+# ✅ 평가 함수 (JSON 파일 기반)
 def evaluate_game24_from_json(path: str, max_samples: int = 50, mode: str = "aot"):
     with open(path, 'r') as f:
         data = json.load(f)["rows"]
-
     _evaluate_samples(data, mode, max_samples, from_json=True)
 
-# ✅ HF 데이터셋 평가 함수 추가
+# ✅ 평가 함수 (HF 데이터셋)
 def evaluate_game24_from_hf(max_samples: int = 50, mode: str = "aot"):
     dataset = load_dataset("nlile/24-game")["train"]
     data = [{"row_idx": i, "row": row} for i, row in enumerate(dataset.select(range(max_samples)))]
     _evaluate_samples(data, mode, max_samples, from_json=False)
 
-# ✅ 공통 평가 로직
+# ✅ 공통 평가 루틴
 def _evaluate_samples(data, mode, max_samples, from_json):
     correct = 0
     total = 0
@@ -104,19 +147,22 @@ def _evaluate_samples(data, mode, max_samples, from_json):
     with open(log_path, 'w') as logfile:
         for sample in tqdm(data[:max_samples]):
             row_id = sample["row_idx"]
-            row = sample["row"] if from_json else sample["row"]
+            row = sample["row"]
             numbers = row["numbers"]
             ground_truth = row["solutions"][0] if row["solutions"] else "N/A"
             observation = f"Given the numbers {numbers}, use +, -, *, / and parentheses to make the number 24."
 
+            # ✅ 모드에 따라 프롬프트 선택
             if mode == "aot":
                 prompt = aot_structured_prompt(observation, numbers)
             elif mode == "cot":
                 prompt = Baseline2_cot(observation, numbers)
             elif mode == "zero_shot":
                 prompt = Baseline1_zeroshot(observation, numbers)
+            elif mode == "plam":
+                prompt = plam_prompt(observation, numbers)
             else:
-                raise ValueError("Invalid mode. Use one of: aot, cot, zero_shot")
+                raise ValueError("Invalid mode. Use one of: aot, cot, zero_shot, plam")
 
             llm_response, usage = run_prompt(prompt, mode)
             error_type = None
@@ -176,10 +222,10 @@ def _evaluate_samples(data, mode, max_samples, from_json):
     print(f"\n✅ Final Accuracy ({mode}): {correct}/{total} ({accuracy:.2%})")
     print(f"📁 Logs saved to: {log_path}")
 
-# ✅ 명령행 실행
+# ✅ CLI 엔트리포인트
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, default="aot", choices=["aot", "cot", "zero_shot"], help="Prompting strategy to use")
+    parser.add_argument("--mode", type=str, default="aot", choices=["aot", "cot", "zero_shot", "plam"], help="Prompting strategy to use")
     parser.add_argument("--file", type=str, default="game24.json", help="Path to dataset file (use 'hf' to load from Hugging Face)")
     parser.add_argument("--samples", type=int, default=5, help="Number of samples to evaluate")
     args = parser.parse_args()
@@ -189,17 +235,10 @@ if __name__ == "__main__":
     else:
         evaluate_game24_from_json(path=args.file, max_samples=args.samples, mode=args.mode)
 
-#     # AOT 방식 평가
-# python3 bench_24.py --mode aot --samples 10
 
-# # Chain-of-Thought 방식 평가
-# python3 bench_24.py --mode cot --samples 10
 
-# # Zero-shot 방식 평가
-# python3 bench_24.py --mode zero_shot --samples 10
+# P-LAM 방식 평가 (Hugging Face 데이터셋 사용)
+#python3 bench_24.py --mode plam --file hf --samples 1362
 
-# HF
-# python3 bench_24.py --mode aot --file hf --samples 1362
-
-# Local
-# python3 bench_24.py --mode aot --file game24.json --samples 1362
+# P-LAM 방식 평가 (로컬 JSON)
+#python3 bench_24.py --mode plam --file game24.json --samples 20
