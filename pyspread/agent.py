@@ -61,14 +61,14 @@ class SpreadsheetAgent:
 
     def _build_prompt(self, context: Dict[str, Any]) -> str:
         return f"""
-아래는 사용자가 방금 편집한 셀과 그 주변 셀들의 값입니다.
+        아래는 사용자가 방금 편집한 셀과 그 주변 셀들의 값입니다.
 
-이 정보를 바탕으로 사용자의 의도를 파악하고,
-자동으로 채워야 할 셀이 있다면 JSON으로 명확히 응답해주세요.
+        이 정보를 바탕으로 사용자의 의도를 파악하고,
+        자동으로 채워야 할 셀이 있다면 JSON으로 명확히 응답해주세요.
 
-입력:
-{json.dumps(context, ensure_ascii=False, indent=2)}
-"""
+        입력:
+        {json.dumps(context, ensure_ascii=False, indent=2)}
+        """
 
     def _strip_json_block(self, text: str) -> str:
         match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
