@@ -11,7 +11,6 @@ from datasets import load_dataset
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-@backoff.on_exception(backoff.expo, RateLimitError, max_tries=6, max_time=60)
 def completions_with_backoff(**kwargs):
     return openai.ChatCompletion.create(**kwargs)
 
@@ -31,8 +30,6 @@ def run_prompt(prompt: str):
     except Exception as e:
         print(f"❌ API Error: {e}")
         return None, None
-
-# Stage 1: Context Understanding
 
 def plam_stage1_prompt(observation: str, numbers: list):
     return f"""
@@ -63,13 +60,6 @@ Classify the type of problem or domain (e.g., arithmetic puzzle, planning task, 
 
 # [STEP 4: Extract Relevant High-Level Principles or Constraints]
 Based on the domain, identify key concepts or constraints that should be considered when solving this type of task.  
-Examples include:
-- Arithmetic problems: order of operations, associativity, commutativity  
-- Physical tasks: gravity, stacking stability, size and weight constraints  
-- Scheduling tasks: precedence, time windows, dependencies  
-- Logic puzzles: deduction, mutual exclusivity, state transitions
-
-Be sure to extract **domain-relevant rules** that would inform your planning.
 
 ----
 
@@ -84,8 +74,6 @@ If Intervention is **Yes**, also return a structured context summary to inform t
 Format:
 {{"rephrased": "...", "goal": "...", "domain": "...", "principles": "...", "intervention": "Yes"}}  
 """
-
-# Stage 2: Planning and Execution
 
 def plam_stage2_prompt(context: str, numbers: list):
     return f"""
@@ -120,25 +108,28 @@ At the end, return:
 """
 
 def run_two_stage_plam(observation: str, numbers: list):
-    stage1 = plam_stage1_prompt(observation, numbers)
-    stage1_output, _ = run_prompt(stage1)
+    stage1_prompt = plam_stage1_prompt(observation, numbers)
+    stage1_output, _ = run_prompt(stage1_prompt)
 
     if not stage1_output or "Intervention: No" in stage1_output:
-        return stage1_output, None, None
+        return stage1_output, None, None, None
 
-    planning_context = stage1_output
-    stage2 = plam_stage2_prompt(planning_context, numbers)
-    stage2_output, usage = run_prompt(stage2)
+    context = stage1_output
+    stage2_prompt = plam_stage2_prompt(context, numbers)
+    stage2_output, usage = run_prompt(stage2_prompt)
 
-    return stage1_output, stage2_output, usage
+    return stage1_output, stage2_output, usage, stage2_prompt
 
-def evaluate_game24(samples: int):
+def evaluate_game24(samples: int, use_random: bool):
     dataset = load_dataset("nlile/24-game")['train']
+    if use_random:
+        dataset = dataset.shuffle(seed=42)
     data = [{"row_idx": i, "row": row} for i, row in enumerate(dataset.select(range(samples)))]
+
     correct = 0
     total = 0
     os.makedirs("logs", exist_ok=True)
-    log_path = f"logs/game24_logs_plam.jsonl"
+    log_path = "logs/game24_logs_plam.jsonl"
 
     with open(log_path, 'w') as logfile:
         for sample in tqdm(data):
@@ -148,15 +139,22 @@ def evaluate_game24(samples: int):
             ground_truth = row["solutions"][0] if row["solutions"] else "N/A"
             observation = f"Given the numbers {numbers}, use +, -, *, / and parentheses to make the number 24."
 
-            stage1, stage2, usage = run_two_stage_plam(observation, numbers)
-            prompt_used = stage1 + "\n---\n" + (stage2 or "")
+            stage1, stage2, usage, stage2_prompt = run_two_stage_plam(observation, numbers)
+            prompt_used = (stage1 or "") + "\n---\n" + (stage2 or "")
             llm_response = stage2
 
             error_type = parsed_expr = eval_result = None
             is_correct = False
+            solved_at_trial = None
 
             if llm_response:
                 try:
+                    trials = re.findall(r"### Trial (\d+):.*?Evaluation:\s*\[(Success|Failure)\]", llm_response, re.DOTALL)
+                    for trial_num, result in trials:
+                        if result.strip().lower() == "success":
+                            solved_at_trial = int(trial_num)
+                            break
+
                     match = re.search(r"\{.*\}", llm_response, re.DOTALL)
                     parsed_json = json.loads(match.group()) if match else None
                     parsed_expr = parsed_json["solution"] if parsed_json else None
@@ -182,7 +180,8 @@ def evaluate_game24(samples: int):
             print(f"\n🧩 Input Numbers: {numbers}")
             print(f"🎯 Ground Truth : {ground_truth}")
             print(f"🧠 Stage 1 Output:\n{stage1}")
-            print(f"🤖 Stage 2 Response:\n{stage2}\n")
+            print(f"🤖 Stage 2 Response:\n{stage2}")
+            print(f"🔁 Solved At Trial: {solved_at_trial}")
             print(f"✅ Parsed       : {parsed_expr}")
             print(f"📌 Result       : {'✅ Correct' if is_correct else '❌ Incorrect'}")
 
@@ -199,6 +198,7 @@ def evaluate_game24(samples: int):
                 "input_tokens": usage["prompt_tokens"] if usage else None,
                 "output_tokens": usage["completion_tokens"] if usage else None,
                 "total_tokens": usage["total_tokens"] if usage else None,
+                "solved_at_trial": solved_at_trial,
                 "timestamp": datetime.utcnow().isoformat()
             }
             logfile.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
@@ -210,7 +210,6 @@ def evaluate_game24(samples: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=5, help="Number of samples to evaluate")
+    parser.add_argument("--random", action="store_true", help="Use random sampling of the dataset")
     args = parser.parse_args()
-    evaluate_game24(samples=args.samples)
-
-# python3 bench_24.py --samples 15
+    evaluate_game24(samples=args.samples, use_random=args.random)
