@@ -264,6 +264,81 @@ At the end, return:
 {{"question": "{question}", "evidence": "see above", "solution": true/false}}  
 """
 
+def plam_stage1_prompt_omniplan(problem_english: str):
+    return f"""
+You are a reflective reasoning agent. Your first task is to understand the situation, identify the domain, and extract relevant abstract knowledge before attempting a solution.
+
+Follow these steps:
+
+# [ENVIRONMENT STATE]
+- Planning Task: {problem_english}
+
+----
+
+# [STEP 1: Rephrase the Situation]
+Briefly summarize what's happening based on the planning task.
+
+----
+
+# [STEP 2: Infer the User's Goal]
+What is the user likely trying to accomplish?
+
+----
+
+# [STEP 3: Identify Domain & Task Type]
+Classify the type of problem or domain (e.g., planning, scheduling, constraint satisfaction, etc.)
+
+----
+
+# [STEP 4: Extract Relevant High-Level Principles or Constraints]
+Based on the domain, identify key concepts or constraints that should be considered when solving this type of task.
+
+----
+
+# [STEP 5: Should You Intervene?]
+- Intervention: [Yes / No]
+- Reason:
+
+----
+
+If Intervention is **Yes**, also return a structured context summary to inform the next planning phase.
+
+Format:
+{{"rephrased": "...", "goal": "...", "domain": "...", "principles": "...", "intervention": "Yes"}}
+"""
+
+def plam_stage2_prompt_omniplan(context: str, problem_english: str):
+    return f"""
+You are now in execution mode.
+
+Use the following context, which includes the problem setting, user goal, domain, and relevant reasoning principles, to generate a plan.
+
+# [CONTEXT FROM STAGE 1]
+{context}
+
+# [PLANNING TASK]
+{problem_english}
+
+Now follow these steps:
+1. Plan a high-level approach based on the domain and constraints.
+2. Break down the plan into subtasks (e.g., action order, subgoals, resource allocation).
+3. Execute each subtask step-by-step.
+4. After each trial, evaluate whether the plan satisfies all constraints.
+5. If failed, revise your plan and try again (up to 5 trials).
+
+Use this format:
+
+### Trial N:
+- Subtask execution steps:
+- Result (e.g., plan, action order, subgoals):
+- Evaluation: [Success / Failure]
+- If failed: Briefly explain what went wrong and revise.
+
+At the end, return:
+
+{{"task": "{problem_english}", "solution": "(...)"}}
+"""
+
 # ------------------- 2단계 실행 함수 -------------------
 def run_two_stage_plam_game24(observation: str, numbers: list):
     stage1_prompt = plam_stage1_prompt_game24(observation, numbers)
@@ -292,6 +367,16 @@ def run_two_stage_plam_evidence(question: str, evidence: str):
         return stage1_output, None, None, None
     context = stage1_output
     stage2_prompt = plam_stage2_prompt_evidence(context, question, evidence)
+    stage2_output, usage = run_prompt(stage2_prompt)
+    return stage1_output, stage2_output, usage, stage2_prompt
+
+def run_two_stage_plam_omniplan(problem_english: str):
+    stage1_prompt = plam_stage1_prompt_omniplan(problem_english)
+    stage1_output, _ = run_prompt(stage1_prompt)
+    if not stage1_output or "Intervention: No" in stage1_output:
+        return stage1_output, None, None, None
+    context = stage1_output
+    stage2_prompt = plam_stage2_prompt_omniplan(context, problem_english)
     stage2_output, usage = run_prompt(stage2_prompt)
     return stage1_output, stage2_output, usage, stage2_prompt
 
@@ -590,12 +675,329 @@ def evaluate_evidence(samples: int, use_random: bool):
     print(f"\n✅ Final Accuracy: {correct}/{total} ({accuracy:.2%})")
     print(f"📁 Logs saved to: {log_path}")
 
+def evaluate_omniplan(samples: int, use_random: bool, config: str, start: int = 0):
+    dataset = load_dataset("tasksource/omniplan", config)["train"]
+    if use_random:
+        dataset = dataset.shuffle(seed=42)
+    data = [
+        {"row_idx": i, "row": row}
+        for i, row in enumerate(dataset.select(range(start, start+samples)), start=start)
+    ]
+
+    correct = 0
+    total = 0
+    os.makedirs("logs", exist_ok=True)
+    log_path = f"logs/omniplan_{config}_logs_plam.jsonl"
+    completed = get_completed_indices(log_path)
+
+    def normalize_plan(plan):
+        return plan.strip().lower() if isinstance(plan, str) else ""
+
+    with open(log_path, 'a') as logfile:
+        for sample in tqdm(data):
+            row_id = sample["row_idx"]
+            if row_id in completed:
+                continue
+            row = sample["row"]
+            problem_english = row.get("problem_english")
+            ground_truth = row.get("plan")
+
+            stage1, stage2, usage, stage2_prompt = run_two_stage_plam_omniplan(problem_english)
+            prompt_used = (stage1 or "") + "\n---\n" + (stage2 or "")
+            llm_response = stage2
+
+            error_type = parsed_pred = None
+            is_correct = False
+            solved_at_trial = None
+            norm_pred = norm_gt = "N/A"
+            parse_debug = ""
+
+            if llm_response:
+                try:
+                    trials = re.findall(r"### Trial (\d+):.*?Evaluation:\s*\[(Success|Failure)\]", llm_response, re.DOTALL)
+                    for trial_num, result in trials:
+                        if result.strip().lower() == "success":
+                            solved_at_trial = int(trial_num)
+                            break
+                    matches = re.findall(r"\{.*?\}", llm_response, re.DOTALL)
+                    parse_debug = f"JSON matches found: {len(matches)}"
+                    if matches:
+                        last_json = matches[-1]
+                        parsed_json = json.loads(last_json)
+                        parsed_pred = parsed_json["solution"] if "solution" in parsed_json else None
+                        parse_debug += f", last_json: {last_json}"
+                    else:
+                        error_type = "no_json_block"
+                        parse_debug += ", no JSON block found"
+                except Exception as e:
+                    error_type = f"parse_error: {e}"
+                    parse_debug += f", Exception: {e}"
+                    parsed_pred = None
+
+                if parsed_pred is not None and ground_truth is not None:
+                    norm_pred = normalize_plan(parsed_pred)
+                    norm_gt = normalize_plan(ground_truth)
+                    is_correct = norm_pred in norm_gt or norm_gt in norm_pred
+                    error_type = None if is_correct else "wrong_result"
+                else:
+                    error_type = error_type or "parse_error"
+            else:
+                error_type = "llm_no_response"
+
+            total += 1
+            if is_correct:
+                correct += 1
+
+            print(f"\n🧩 Planning Task: {problem_english}")
+            print(f"🎯 Ground Truth : {ground_truth}")
+            print(f"🧠 Stage 1 Output:\n{stage1}")
+            print(f"🤖 Stage 2 Response:\n{stage2}")
+            print(f"🔁 Solved At Trial: {solved_at_trial}")
+            print(f"✅ Parsed       : {parsed_pred}")
+            print(f"[DEBUG] Parse info: {parse_debug}")
+            print(f"📌 Result       : {'✅ Correct' if is_correct else '❌ Incorrect'}")
+            print(f"[DEBUG] Error type: {error_type}")
+
+            log_entry = {
+                "id": row_id,
+                "problem_english": problem_english,
+                "ground_truth": ground_truth,
+                "prompt": prompt_used,
+                "llm_response": llm_response,
+                "parsed_prediction": parsed_pred,
+                "is_correct": is_correct,
+                "error_type": error_type,
+                "parse_debug": parse_debug,
+                "input_tokens": usage["prompt_tokens"] if usage else None,
+                "output_tokens": usage["completion_tokens"] if usage else None,
+                "total_tokens": usage["total_tokens"] if usage else None,
+                "solved_at_trial": solved_at_trial,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            logfile.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+            logfile.flush()
+
+    accuracy = correct / total if total > 0 else 0.0
+    print(f"\n✅ Final Accuracy: {correct}/{total} ({accuracy:.2%})")
+    print(f"📁 Logs saved to: {log_path}")
+
+def plam_stage1_prompt_tripplanning(prompt_0shot: str):
+    return f"""
+You are a reflective reasoning agent. Your first task is to understand the situation, identify the domain, and extract relevant abstract knowledge before attempting a solution.
+
+Follow these steps:
+
+# [ENVIRONMENT STATE]
+- Trip Planning Task: {prompt_0shot}
+
+----
+
+# [STEP 1: Rephrase the Situation]
+Briefly summarize what's happening based on the trip planning task.
+
+----
+
+# [STEP 2: Infer the User's Goal]
+What is the user likely trying to accomplish?
+
+----
+
+# [STEP 3: Identify Domain & Task Type]
+Classify the type of problem or domain (e.g., trip planning, scheduling, constraint satisfaction, etc.)
+
+----
+
+# [STEP 4: Extract Relevant High-Level Principles or Constraints]
+Based on the domain, identify key concepts or constraints that should be considered when solving this type of task.
+
+----
+
+# [STEP 5: Should You Intervene?]
+- Intervention: [Yes / No]
+- Reason:
+
+----
+
+If Intervention is **Yes**, also return a structured context summary to inform the next planning phase.
+
+Format:
+{{"rephrased": "...", "goal": "...", "domain": "...", "principles": "...", "intervention": "Yes"}}
+"""
+
+def plam_stage2_prompt_tripplanning(context: str, prompt_0shot: str):
+    return f"""
+You are now in execution mode.
+
+Use the following context, which includes the problem setting, user goal, domain, and relevant reasoning principles, to generate a trip plan.
+
+# [CONTEXT FROM STAGE 1]
+{context}
+
+# [TRIP PLANNING TASK]
+{prompt_0shot}
+
+Now follow these steps:
+1. Plan a high-level approach based on the domain and constraints.
+2. Break down the plan into subtasks (e.g., city order, flight connections, day allocation).
+3. Execute each subtask step-by-step.
+4. After each trial, evaluate whether the plan satisfies all constraints.
+5. If failed, revise your plan and try again (up to 5 trials).
+
+Use this format:
+
+### Trial N:
+- Subtask execution steps:
+- Result (e.g., plan, city order, day allocation):
+- Evaluation: [Success / Failure]
+- If failed: Briefly explain what went wrong and revise.
+
+At the end, return:
+
+{{"task": "{prompt_0shot}", "solution": "(...)"}}
+"""
+
+def run_two_stage_plam_tripplanning(prompt_0shot: str):
+    stage1_prompt = plam_stage1_prompt_tripplanning(prompt_0shot)
+    stage1_output, _ = run_prompt(stage1_prompt)
+    if not stage1_output or "Intervention: No" in stage1_output:
+        return stage1_output, None, None, None
+    context = stage1_output
+    stage2_prompt = plam_stage2_prompt_tripplanning(context, prompt_0shot)
+    stage2_output, usage = run_prompt(stage2_prompt)
+    return stage1_output, stage2_output, usage, stage2_prompt
+
+def get_completed_indices(log_path):
+    completed = set()
+    if os.path.exists(log_path):
+        with open(log_path, 'r') as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    completed.add(entry.get("id"))
+                except:
+                    continue
+    return completed
+
+def evaluate_tripplanning(samples: int, use_random: bool, start: int = 0):
+    # trip_planning.json 로드
+    with open("trip_planning.json", "r") as f:
+        raw_data = json.load(f)
+    if isinstance(raw_data, dict):
+        # dict 타입이면 value만 모아서 리스트로 변환
+        raw_data = list(raw_data.values())
+    if use_random:
+        import random
+        random.seed(42)
+        random.shuffle(raw_data)
+    data = [{"row_idx": i, "row": row} for i, row in enumerate(raw_data[start:start+samples], start=start)]
+
+    correct = 0
+    total = 0
+    os.makedirs("logs", exist_ok=True)
+    log_path = "logs/tripplanning_logs_plam.jsonl"
+    completed = get_completed_indices(log_path)
+
+    def normalize_plan(plan):
+        # 단순 substring 포함 여부로 평가 (향후 rouge/bleu 등으로 개선 가능)
+        return plan.strip().lower() if isinstance(plan, str) else ""
+
+    with open(log_path, 'a') as logfile:
+        for sample in tqdm(data):
+            row_id = sample["row_idx"]
+            if row_id in completed:
+                continue
+            row = sample["row"]
+            prompt_0shot = row.get("prompt_0shot")
+            ground_truth = row.get("golden_plan")
+
+            stage1, stage2, usage, stage2_prompt = run_two_stage_plam_tripplanning(prompt_0shot)
+            prompt_used = (stage1 or "") + "\n---\n" + (stage2 or "")
+            llm_response = stage2
+
+            error_type = parsed_pred = None
+            is_correct = False
+            solved_at_trial = None
+            norm_pred = norm_gt = "N/A"
+            parse_debug = ""
+
+            if llm_response:
+                try:
+                    trials = re.findall(r"### Trial (\d+):.*?Evaluation:\s*\[(Success|Failure)\]", llm_response, re.DOTALL)
+                    for trial_num, result in trials:
+                        if result.strip().lower() == "success":
+                            solved_at_trial = int(trial_num)
+                            break
+                    matches = re.findall(r"\{.*?\}", llm_response, re.DOTALL)
+                    parse_debug = f"JSON matches found: {len(matches)}"
+                    if matches:
+                        last_json = matches[-1]
+                        parsed_json = json.loads(last_json)
+                        parsed_pred = parsed_json["solution"] if "solution" in parsed_json else None
+                        parse_debug += f", last_json: {last_json}"
+                    else:
+                        error_type = "no_json_block"
+                        parse_debug += ", no JSON block found"
+                except Exception as e:
+                    error_type = f"parse_error: {e}"
+                    parse_debug += f", Exception: {e}"
+                    parsed_pred = None
+
+                if parsed_pred is not None and ground_truth is not None:
+                    norm_pred = normalize_plan(parsed_pred)
+                    norm_gt = normalize_plan(ground_truth)
+                    # 단순 substring 포함 여부로 평가
+                    is_correct = norm_pred in norm_gt or norm_gt in norm_pred
+                    error_type = None if is_correct else "wrong_result"
+                else:
+                    error_type = error_type or "parse_error"
+            else:
+                error_type = "llm_no_response"
+
+            total += 1
+            if is_correct:
+                correct += 1
+
+            print(f"\n🗺️ Trip Planning Task: {prompt_0shot}")
+            print(f"🎯 Ground Truth : {ground_truth}")
+            print(f"🧠 Stage 1 Output:\n{stage1}")
+            print(f"🤖 Stage 2 Response:\n{stage2}")
+            print(f"🔁 Solved At Trial: {solved_at_trial}")
+            print(f"✅ Parsed       : {parsed_pred}")
+            print(f"[DEBUG] Parse info: {parse_debug}")
+            print(f"📌 Result       : {'✅ Correct' if is_correct else '❌ Incorrect'}")
+            print(f"[DEBUG] Error type: {error_type}")
+
+            log_entry = {
+                "id": row_id,
+                "prompt_0shot": prompt_0shot,
+                "ground_truth": ground_truth,
+                "prompt": prompt_used,
+                "llm_response": llm_response,
+                "parsed_prediction": parsed_pred,
+                "is_correct": is_correct,
+                "error_type": error_type,
+                "parse_debug": parse_debug,
+                "input_tokens": usage["prompt_tokens"] if usage else None,
+                "output_tokens": usage["completion_tokens"] if usage else None,
+                "total_tokens": usage["total_tokens"] if usage else None,
+                "solved_at_trial": solved_at_trial,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            logfile.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+            logfile.flush()
+
+    accuracy = correct / total if total > 0 else 0.0
+    print(f"\n✅ Final Accuracy: {correct}/{total} ({accuracy:.2%})")
+    print(f"📁 Logs saved to: {log_path}")
+
 # ------------------- main -------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="game24", choices=["game24", "gsm8k", "evidence"], help="데이터셋 종류")
+    parser.add_argument("--dataset", type=str, default="game24", choices=["game24", "gsm8k", "evidence", "superni", "tripplanning", "omniplan"], help="데이터셋 종류")
     parser.add_argument("--samples", type=int, default=5, help="Number of samples to evaluate")
     parser.add_argument("--random", action="store_true", help="Use random sampling of the dataset")
+    parser.add_argument("--start", type=int, default=0, help="시작 인덱스 (이어하기용)")
+    parser.add_argument("--omniplan_config", type=str, default="blocksworld", choices=["blocksworld", "fertile", "mystery", "random"], help="omniplan config")
     args = parser.parse_args()
 
     if args.dataset == "game24":
@@ -604,3 +1006,7 @@ if __name__ == "__main__":
         evaluate_gsm8k(samples=args.samples, use_random=args.random)
     elif args.dataset == "evidence":
         evaluate_evidence(samples=args.samples, use_random=args.random)
+    elif args.dataset == "tripplanning":
+        evaluate_tripplanning(samples=args.samples, use_random=args.random, start=args.start)
+    elif args.dataset == "omniplan":
+        evaluate_omniplan(samples=args.samples, use_random=args.random, config=args.omniplan_config, start=args.start)
